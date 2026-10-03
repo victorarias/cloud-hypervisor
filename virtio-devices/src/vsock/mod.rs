@@ -142,12 +142,22 @@ pub trait VsockChannel {
     fn has_pending_rx(&self) -> bool;
 }
 
+pub(crate) fn default_local_port_last() -> u32 {
+    (1u32 << 30) - 1
+}
+
 /// The vsock backend, which is basically an epoll-event-driven vsock channel
 ///
 /// It that needs to be sendable through a mpsc channel (the latter due to how `vmm::EpollContext` works).
 /// Currently, the only implementation we have is `crate::virtio::unix::muxer::VsockMuxer`, which
 /// translates guest-side vsock connections to host-side Unix domain socket connections.
 pub trait VsockBackend: VsockChannel + VsockEpollListener + Send {
+    /// Last allocated host port, including connections already closed.
+    fn local_port_last(&self) -> u32 {
+        default_local_port_last()
+    }
+    fn set_local_port_last(&mut self, _port: u32) {}
+
     fn connections(&self) -> Vec<(u32, u32)> {
         Vec::new()
     }

@@ -347,6 +347,15 @@ impl VsockEpollListener for VsockMuxer {
 }
 
 impl VsockBackend for VsockMuxer {
+    fn local_port_last(&self) -> u32 {
+        self.local_port_last
+    }
+
+    fn set_local_port_last(&mut self, port: u32) {
+        debug!("vsock: restoring host port allocator local_port_last={port}");
+        self.local_port_last = port;
+    }
+
     fn connections(&self) -> Vec<(u32, u32)> {
         self.conn_map
             .keys()
@@ -391,7 +400,7 @@ impl VsockMuxer {
             listener_map: HashMap::with_capacity(defs::MAX_CONNECTIONS + 1),
             partial_command_map: Default::default(),
             killq: MuxerKillQ::new(),
-            local_port_last: (1u32 << 30) - 1,
+            local_port_last: crate::vsock::default_local_port_last(),
             local_port_map: HashMap::with_capacity(defs::MAX_CONNECTIONS),
         };
 
@@ -1100,6 +1109,83 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_file(&self.path).unwrap();
         }
+    }
+
+    #[test]
+    fn test_snapshot_restores_local_port_highwater() {
+        use vm_migration::Snapshottable;
+        use vmm_sys_util::eventfd::EventFd;
+        use vmm_sys_util::tempdir::TempDir;
+
+        use crate::vsock::device::{Vsock, VsockState};
+
+        let dir = TempDir::new_with_prefix("/tmp/vsock-highwater-").unwrap();
+        let path = dir.as_path().join("original.sock");
+        let mut backend = VsockMuxer::new(PEER_CID, path.to_str().unwrap().into()).unwrap();
+        let first = backend.allocate_local_port(1024);
+        let last = backend.allocate_local_port(1024);
+        backend.free_local_port(ConnMapKey {
+            local_port: first,
+            peer_port: 1024,
+        });
+        backend.free_local_port(ConnMapKey {
+            local_port: last,
+            peer_port: 1024,
+        });
+        assert!(backend.connections().is_empty());
+        let mut device = Vsock::new(
+            "vsock".into(),
+            PEER_CID,
+            path,
+            backend,
+            false,
+            seccompiler::SeccompAction::Trap,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            None,
+        )
+        .unwrap();
+        let snapshot = device.snapshot().unwrap();
+        let state: VsockState = snapshot.to_state().unwrap();
+        assert_eq!(state.local_port_last, last);
+        let path = dir.as_path().join("restored.sock");
+        let backend = VsockMuxer::new(PEER_CID, path.to_str().unwrap().into()).unwrap();
+        let mut restored = Vsock::new(
+            "vsock".into(),
+            PEER_CID,
+            path,
+            backend,
+            false,
+            seccompiler::SeccompAction::Trap,
+            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
+            Some(state),
+        )
+        .unwrap();
+        // A second snapshot observes the restored allocator through the device boundary.
+        let state: VsockState = restored.snapshot().unwrap().to_state().unwrap();
+        let mut fresh = MuxerTestContext::new("snapshot_highwater");
+        fresh.muxer.set_local_port_last(state.local_port_last);
+        assert_eq!(fresh.muxer.allocate_local_port(1024), last + 1);
+    }
+
+    #[test]
+    fn test_snapshot_without_local_port_highwater() {
+        #[derive(serde::Serialize)]
+        struct LegacyState {
+            avail_features: u64,
+            acked_features: u64,
+            connections: Vec<(u32, u32)>,
+        }
+        let snapshot = vm_migration::Snapshot::new_from_state(&LegacyState {
+            avail_features: 1,
+            acked_features: 1,
+            connections: Vec::new(),
+        })
+        .unwrap();
+        let state: crate::vsock::device::VsockState = snapshot.to_state().unwrap();
+        assert_eq!(
+            state.local_port_last,
+            crate::vsock::default_local_port_last()
+        );
     }
 
     #[test]
