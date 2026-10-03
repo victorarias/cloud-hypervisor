@@ -357,6 +357,8 @@ pub struct Vsock<B: VsockBackend> {
 pub struct VsockState {
     pub avail_features: u64,
     pub acked_features: u64,
+    #[serde(default = "super::default_local_port_last")]
+    pub local_port_last: u32,
     #[serde(default)]
     pub connections: Vec<(u32, u32)>,
 }
@@ -382,6 +384,7 @@ where
             info!("Restoring virtio-vsock {id}");
             // Instead of letting the guest connection hang/timeout, proactively let
             // the guest know the connection is gone.
+            backend.set_local_port_last(state.local_port_last);
             backend.queue_rst_for_connections(state.connections.clone());
             (state.avail_features, state.acked_features, true)
         } else {
@@ -417,6 +420,7 @@ where
         VsockState {
             avail_features: self.common.avail_features,
             acked_features: self.common.acked_features,
+            local_port_last: self.backend.read().unwrap().local_port_last(),
             connections: self.backend.read().unwrap().connections(),
         }
     }
